@@ -1,329 +1,264 @@
-#!/usr/bin/env python3
-"""
-RunPod Handler for WAN 2.2 I2V using wan2.2i2v.json workflow
-"""
-
 import runpod
-import requests
-import json
+from runpod.serverless.utils import rp_upload
 import os
-import sys
+import websocket
 import base64
+import json
 import uuid
-from PIL import Image
-import io
+import logging
+import urllib.request
+import urllib.parse
+import binascii # Base64 에러 처리를 위해 import
+# 로깅 설정
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Add ComfyUI to path
-sys.path.append('/app/ComfyUI')
 
-def load_workflow():
-    """Load the WAN 2.2 I2V workflow"""
+server_address = os.getenv('SERVER_ADDRESS', '127.0.0.1')
+client_id = str(uuid.uuid4())
+def save_data_if_base64(data_input, temp_dir, output_filename):
+    """
+    입력 데이터가 Base64 문자열인지 확인하고, 맞다면 파일로 저장 후 경로를 반환합니다.
+    만약 일반 경로 문자열이라면 그대로 반환합니다.
+    """
+    # 입력값이 문자열이 아니면 그대로 반환
+    if not isinstance(data_input, str):
+        return data_input
+
     try:
-        with open('/app/workflow.json', 'r') as f:
-            workflow = json.load(f)
-        print("✅ Workflow loaded successfully")
-        return workflow
-    except Exception as e:
-        print(f"❌ Error loading workflow: {e}")
-        return None
+        # Base64 문자열은 디코딩을 시도하면 성공합니다.
+        decoded_data = base64.b64decode(data_input)
+        
+        # 디렉토리가 존재하지 않으면 생성
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # 디코딩에 성공하면, 임시 파일로 저장합니다.
+        file_path = os.path.abspath(os.path.join(temp_dir, output_filename))
+        with open(file_path, 'wb') as f: # 바이너리 쓰기 모드('wb')로 저장
+            f.write(decoded_data)
+        
+        # 저장된 파일의 경로를 반환합니다.
+        print(f"✅ Base64 입력을 '{file_path}' 파일로 저장했습니다.")
+        return file_path
 
-def update_workflow_parameters(workflow, prompt, negative_prompt, image_path, **kwargs):
-    """Update workflow with user parameters"""
-    try:
-        # Update positive prompt (node 93 in your workflow)
-        if "93" in workflow["nodes"]:
-            for node in workflow["nodes"]:
-                if node.get("id") == 93 and node.get("type") == "CLIPTextEncode":
-                    node["widgets_values"] = [prompt]
-                    print(f"✅ Updated positive prompt: {prompt[:50]}...")
+    except (binascii.Error, ValueError):
+        # 디코딩에 실패하면, 일반 경로로 간주하고 원래 값을 그대로 반환합니다.
+        print(f"➡️ '{data_input}'은(는) 파일 경로로 처리합니다.")
+        return data_input
+    
+def queue_prompt(prompt):
+    url = f"http://{server_address}:8188/prompt"
+    logger.info(f"Queueing prompt to: {url}")
+    p = {"prompt": prompt, "client_id": client_id}
+    data = json.dumps(p).encode('utf-8')
+    req = urllib.request.Request(url, data=data)
+    return json.loads(urllib.request.urlopen(req).read())
+
+def get_image(filename, subfolder, folder_type):
+    url = f"http://{server_address}:8188/view"
+    logger.info(f"Getting image from: {url}")
+    data = {"filename": filename, "subfolder": subfolder, "type": folder_type}
+    url_values = urllib.parse.urlencode(data)
+    with urllib.request.urlopen(f"{url}?{url_values}") as response:
+        return response.read()
+
+def get_history(prompt_id):
+    url = f"http://{server_address}:8188/history/{prompt_id}"
+    logger.info(f"Getting history from: {url}")
+    with urllib.request.urlopen(url) as response:
+        return json.loads(response.read())
+
+def get_videos(ws, prompt):
+    prompt_id = queue_prompt(prompt)['prompt_id']
+    output_videos = {}
+    while True:
+        out = ws.recv()
+        if isinstance(out, str):
+            message = json.loads(out)
+            if message['type'] == 'executing':
+                data = message['data']
+                if data['node'] is None and data['prompt_id'] == prompt_id:
                     break
-        
-        # Update negative prompt (node 89 in your workflow)  
-        if "89" in workflow["nodes"]:
-            for node in workflow["nodes"]:
-                if node.get("id") == 89 and node.get("type") == "CLIPTextEncode":
-                    node["widgets_values"] = [negative_prompt]
-                    print(f"✅ Updated negative prompt: {negative_prompt[:50]}...")
-                    break
-        
-        # Update image input (node 97 - LoadImage)
-        for node in workflow["nodes"]:
-            if node.get("id") == 97 and node.get("type") == "LoadImage":
-                # Extract filename from path
-                filename = os.path.basename(image_path)
-                node["widgets_values"] = [filename, "image"]
-                print(f"✅ Updated input image: {filename}")
-                break
-        
-        # Update video parameters in WanImageToVideo node (node 98)
-        for node in workflow["nodes"]:
-            if node.get("id") == 98 and node.get("type") == "WanImageToVideo":
-                width = kwargs.get('width', 640)
-                height = kwargs.get('height', 640) 
-                length = kwargs.get('length', 81)
-                batch_size = kwargs.get('batch_size', 1)
-                node["widgets_values"] = [width, height, length, batch_size]
-                print(f"✅ Updated video params: {width}x{height}, {length} frames")
-                break
-        
-        # Update sampler parameters (nodes 86, 85)
-        seed = kwargs.get('seed', 42)
-        steps = kwargs.get('steps', 4)  # Default to 4 for Lightning LoRA
-        cfg = kwargs.get('cfg', 1.0)    # Default to 1.0 for Lightning LoRA
-        
-        # Update high noise sampler (node 86)
-        for node in workflow["nodes"]:
-            if node.get("id") == 86 and node.get("type") == "KSamplerAdvanced":
-                widgets = node.get("widgets_values", [])
-                if len(widgets) >= 10:
-                    widgets[1] = seed  # noise_seed
-                    widgets[3] = steps  # steps
-                    widgets[4] = cfg    # cfg
-                    print(f"✅ Updated high noise sampler: seed={seed}, steps={steps}, cfg={cfg}")
-                break
-        
-        # Update low noise sampler (node 85)  
-        for node in workflow["nodes"]:
-            if node.get("id") == 85 and node.get("type") == "KSamplerAdvanced":
-                widgets = node.get("widgets_values", [])
-                if len(widgets) >= 10:
-                    widgets[1] = 0      # noise_seed (fixed for second pass)
-                    widgets[3] = steps  # steps
-                    widgets[4] = cfg    # cfg
-                    print(f"✅ Updated low noise sampler: steps={steps}, cfg={cfg}")
-                break
-        
-        return workflow
-        
-    except Exception as e:
-        print(f"❌ Error updating workflow parameters: {e}")
-        return None
-
-def process_image(image_data, image_path):
-    """Process and save image to ComfyUI input directory"""
-    try:
-        # Decode base64 if needed
-        if isinstance(image_data, str):
-            if image_data.startswith('data:image'):
-                image_data = image_data.split(',')[1]
-            image_bytes = base64.b64decode(image_data)
         else:
-            image_bytes = image_data
-        
-        # Open and process image
-        image = Image.open(io.BytesIO(image_bytes))
-        
-        # Convert to RGB if needed
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
-        
-        # Resize to reasonable dimensions (your workflow uses 640x640 by default)
-        max_size = 1024
-        if image.width > max_size or image.height > max_size:
-            image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-        
-        # Save to ComfyUI input directory
-        input_path = f"/app/ComfyUI/input/{os.path.basename(image_path)}"
-        image.save(input_path, 'JPEG', quality=95)
-        
-        print(f"✅ Image saved to: {input_path}")
-        print(f"   Size: {image.width}x{image.height}")
-        
-        return input_path
-        
-    except Exception as e:
-        print(f"❌ Error processing image: {e}")
-        return None
+            continue
 
-def execute_workflow(workflow):
-    """Execute the workflow via ComfyUI API"""
-    try:
-        # Start ComfyUI server if not running
-        import subprocess
-        import time
-        
-        # Start ComfyUI in background
-        print("🚀 Starting ComfyUI server...")
-        process = subprocess.Popen([
-            'python', '/app/ComfyUI/main.py', 
-            '--listen', '0.0.0.0', 
-            '--port', '8188'
-        ], cwd='/app/ComfyUI')
-        
-        # Wait for server to start
-        time.sleep(10)
-        
-        # Submit workflow
-        api_url = "http://localhost:8188/prompt"
-        payload = {
-            "prompt": workflow,
-            "client_id": str(uuid.uuid4())
-        }
-        
-        print("📤 Submitting workflow to ComfyUI...")
-        response = requests.post(api_url, json=payload, timeout=300)
-        
-        if response.status_code == 200:
-            result = response.json()
-            prompt_id = result.get('prompt_id')
-            print(f"✅ Workflow submitted successfully. Prompt ID: {prompt_id}")
-            
-            # Wait for completion and get results
-            return wait_for_completion(prompt_id)
-        else:
-            print(f"❌ Error submitting workflow: {response.status_code}")
-            return None
-            
-    except Exception as e:
-        print(f"❌ Error executing workflow: {e}")
-        return None
+    history = get_history(prompt_id)[prompt_id]
+    for node_id in history['outputs']:
+        node_output = history['outputs'][node_id]
+        videos_output = []
+        if 'gifs' in node_output:
+            for video in node_output['gifs']:
+                # fullpath를 이용하여 직접 파일을 읽고 base64로 인코딩
+                with open(video['fullpath'], 'rb') as f:
+                    video_data = base64.b64encode(f.read()).decode('utf-8')
+                videos_output.append(video_data)
+        output_videos[node_id] = videos_output
 
-def wait_for_completion(prompt_id, timeout=600):
-    """Wait for workflow completion and return results"""
-    try:
-        import time
-        start_time = time.time()
-        
-        while time.time() - start_time < timeout:
-            # Check status
-            status_url = f"http://localhost:8188/history/{prompt_id}"
-            response = requests.get(status_url, timeout=10)
-            
-            if response.status_code == 200:
-                history = response.json()
-                if prompt_id in history:
-                    # Workflow completed
-                    result = history[prompt_id]
-                    
-                    # Find output video
-                    outputs = result.get('outputs', {})
-                    for node_id, node_output in outputs.items():
-                        if 'videos' in node_output:
-                            video_info = node_output['videos'][0]
-                            video_path = f"/app/ComfyUI/output/{video_info['filename']}"
-                            
-                            if os.path.exists(video_path):
-                                print(f"✅ Video generated: {video_path}")
-                                
-                                # Convert to base64
-                                with open(video_path, 'rb') as f:
-                                    video_base64 = base64.b64encode(f.read()).decode('utf-8')
-                                
-                                return {
-                                    'success': True,
-                                    'video_base64': video_base64,
-                                    'video_path': video_path,
-                                    'filename': video_info['filename']
-                                }
-            
-            time.sleep(5)  # Check every 5 seconds
-        
-        print("❌ Timeout waiting for workflow completion")
-        return None
-        
-    except Exception as e:
-        print(f"❌ Error waiting for completion: {e}")
-        return None
+    return output_videos
+
+def load_workflow(workflow_path):
+    with open(workflow_path, 'r') as file:
+        return json.load(file)
 
 def handler(job):
-    """Main RunPod handler function"""
-    try:
-        print("🚀 Starting WAN 2.2 I2V job processing...")
-        
-        # Get job input
-        job_input = job.get('input', {})
-        
-        # Extract parameters
-        prompt = job_input.get('prompt', 'A person walking naturally')
-        negative_prompt = job_input.get('negative_prompt', '色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走')
-        image_path = job_input.get('image_path', '')
-        image_base64 = job_input.get('image_base64', '')
-        
-        # Video parameters
-        width = job_input.get('width', 640)
-        height = job_input.get('height', 640)
-        length = job_input.get('length', 81)
-        seed = job_input.get('seed', 42)
-        steps = job_input.get('steps', 4)
-        cfg = job_input.get('cfg', 1.0)
-        
-        print(f"📝 Parameters:")
-        print(f"   Prompt: {prompt[:50]}...")
-        print(f"   Negative: {negative_prompt[:50]}...")
-        print(f"   Size: {width}x{height}")
-        print(f"   Length: {length} frames")
-        print(f"   Seed: {seed}, Steps: {steps}, CFG: {cfg}")
-        
-        # Load workflow
-        workflow = load_workflow()
-        if not workflow:
-            return {"error": "Failed to load workflow"}
-        
-        # Process image
-        if image_base64:
-            image_filename = f"input_{uuid.uuid4().hex[:8]}.jpg"
-            processed_image_path = process_image(image_base64, image_filename)
-        elif image_path:
-            # Handle network volume path
-            if image_path.startswith('/runpod-volume/'):
-                source_path = image_path
-            else:
-                source_path = f"/runpod-volume/{image_path}"
-            
-            if os.path.exists(source_path):
-                # Copy to ComfyUI input directory
-                image_filename = os.path.basename(source_path)
-                dest_path = f"/app/ComfyUI/input/{image_filename}"
-                
-                import shutil
-                shutil.copy2(source_path, dest_path)
-                processed_image_path = dest_path
-                print(f"✅ Copied image from network volume: {source_path}")
-            else:
-                return {"error": f"Image not found: {source_path}"}
-        else:
-            return {"error": "No image provided"}
-        
-        if not processed_image_path:
-            return {"error": "Failed to process image"}
-        
-        # Update workflow parameters
-        updated_workflow = update_workflow_parameters(
-            workflow, prompt, negative_prompt, processed_image_path,
-            width=width, height=height, length=length,
-            seed=seed, steps=steps, cfg=cfg
-        )
-        
-        if not updated_workflow:
-            return {"error": "Failed to update workflow parameters"}
-        
-        # Execute workflow
-        result = execute_workflow(updated_workflow)
-        
-        if result and result.get('success'):
-            print("🎉 Job completed successfully!")
-            return {
-                "success": True,
-                "video_base64": result['video_base64'],
-                "filename": result['filename'],
-                "parameters": {
-                    "prompt": prompt,
-                    "negative_prompt": negative_prompt,
-                    "width": width,
-                    "height": height,
-                    "length": length,
-                    "seed": seed,
-                    "steps": steps,
-                    "cfg": cfg
-                }
-            }
-        else:
-            return {"error": "Failed to generate video"}
-            
-    except Exception as e:
-        print(f"❌ Handler error: {e}")
-        return {"error": str(e)}
+    job_input = job.get("input", {})
 
-if __name__ == "__main__":
-    print("🚀 Starting WAN 2.2 I2V RunPod Handler...")
-    runpod.serverless.start({"handler": handler})
+    logger.info(f"Received job input: {job_input}")
+    task_id = f"task_{uuid.uuid4()}"
+
+    # image_input = job_input["image_path"]
+    
+    image_path_input = job_input.get("image_path")
+    image_base64_input = job_input.get("image_base64")
+    # 헬퍼 함수를 사용해 이미지 파일 경로 확보 (Base64 또는 Path)
+    # 이미지 확장자를 알 수 없으므로 .jpg로 가정하거나, 입력에서 받아야 합니다.
+    if image_path_input:
+        if image_path_input == "/example_image.png":
+            image_path = "/example_image.png"
+        else:
+            image_path = image_path_input
+    else:
+        # Base64인 경우 디코딩하여 저장
+        try:
+            os.makedirs(task_id, exist_ok=True)
+            image_path = os.path.join(task_id, "input_image.jpg")
+            decoded_data = base64.b64decode(image_base64_input)
+            with open(image_path, 'wb') as f:
+                f.write(decoded_data)
+            logger.info(f"Base64 비디오를 '{image_path}' 파일로 저장했습니다.")
+        except Exception as e:
+            return {"error": f"Base64 이미지 디코딩 실패: {e}"}
+    
+    # LoRA 설정 확인 - 배열로 받아서 처리
+    lora_pairs = job_input.get("lora_pairs", [])
+    
+    # LoRA 개수에 따라 적절한 워크플로우 파일 선택
+    lora_count = len(lora_pairs)
+    if lora_count == 0:
+        workflow_file = "/wan22_nolora.json"
+        logger.info("Using no LoRA workflow")
+    elif lora_count == 1:
+        workflow_file = "/wan22_1lora.json"
+        logger.info("Using 1 LoRA pair workflow")
+    elif lora_count == 2:
+        workflow_file = "/wan22_2lora.json"
+        logger.info("Using 2 LoRA pairs workflow")
+    elif lora_count == 3:
+        workflow_file = "/wan22_3lora.json"
+        logger.info("Using 3 LoRA pairs workflow")
+    else:
+        logger.warning(f"LoRA 개수가 {lora_count}개입니다. 최대 3개까지만 지원됩니다. 3개로 제한합니다.")
+        lora_count = 3
+        workflow_file = "/wan22_3lora.json"
+        lora_pairs = lora_pairs[:3]  # 처음 3개만 사용
+    
+    prompt = load_workflow(workflow_file)
+    
+    length = job_input.get("length", 81)
+    steps = job_input.get("steps", 10)
+
+    prompt["260"]["inputs"]["image"] = image_path
+    prompt["846"]["inputs"]["value"] = length
+    prompt["246"]["inputs"]["value"] = job_input["prompt"]
+    prompt["835"]["inputs"]["noise_seed"] = job_input["seed"]
+    prompt["830"]["inputs"]["cfg"] = job_input["cfg"]
+    prompt["849"]["inputs"]["value"] = job_input["width"]
+    prompt["848"]["inputs"]["value"] = job_input["height"]
+    
+    # step 설정 적용
+    if "834" in prompt:
+        prompt["834"]["inputs"]["steps"] = steps
+        logger.info(f"Steps set to: {steps}")
+        lowsteps = int(steps*0.6)
+        prompt["829"]["inputs"]["step"] = lowsteps
+        logger.info(f"LowSteps set to: {lowsteps}")
+    
+    # LoRA 설정 적용
+    if lora_count > 0:
+        # LoRA 노드 ID 매핑 (각 워크플로우에서 LoRA 노드 ID가 다름)
+        lora_node_mapping = {
+            1: {
+                "high": ["282"],
+                "low": ["286"]
+            },
+            2: {
+                "high": ["282", "339"],
+                "low": ["286", "337"]
+            },
+            3: {
+                "high": ["282", "339", "340"],
+                "low": ["286", "337", "338"]
+            }
+        }
+        
+        current_mapping = lora_node_mapping[lora_count]
+        
+        for i, lora_pair in enumerate(lora_pairs):
+            if i < lora_count:
+                lora_high = lora_pair.get("high")
+                lora_low = lora_pair.get("low")
+                lora_high_weight = lora_pair.get("high_weight", 1.0)
+                lora_low_weight = lora_pair.get("low_weight", 1.0)
+                
+                # HIGH LoRA 설정
+                if i < len(current_mapping["high"]):
+                    high_node_id = current_mapping["high"][i]
+                    if high_node_id in prompt and lora_high:
+                        prompt[high_node_id]["inputs"]["lora_name"] = lora_high
+                        prompt[high_node_id]["inputs"]["strength_model"] = lora_high_weight
+                        logger.info(f"LoRA {i+1} HIGH applied: {lora_high} with weight {lora_high_weight}")
+                
+                # LOW LoRA 설정
+                if i < len(current_mapping["low"]):
+                    low_node_id = current_mapping["low"][i]
+                    if low_node_id in prompt and lora_low:
+                        prompt[low_node_id]["inputs"]["lora_name"] = lora_low
+                        prompt[low_node_id]["inputs"]["strength_model"] = lora_low_weight
+                        logger.info(f"LoRA {i+1} LOW applied: {lora_low} with weight {lora_low_weight}")
+
+    ws_url = f"ws://{server_address}:8188/ws?clientId={client_id}"
+    logger.info(f"Connecting to WebSocket: {ws_url}")
+    
+    # 먼저 HTTP 연결이 가능한지 확인
+    http_url = f"http://{server_address}:8188/"
+    logger.info(f"Checking HTTP connection to: {http_url}")
+    
+    # HTTP 연결 확인 (최대 1분)
+    max_http_attempts = 180
+    for http_attempt in range(max_http_attempts):
+        try:
+            import urllib.request
+            response = urllib.request.urlopen(http_url, timeout=5)
+            logger.info(f"HTTP 연결 성공 (시도 {http_attempt+1})")
+            break
+        except Exception as e:
+            logger.warning(f"HTTP 연결 실패 (시도 {http_attempt+1}/{max_http_attempts}): {e}")
+            if http_attempt == max_http_attempts - 1:
+                raise Exception("ComfyUI 서버에 연결할 수 없습니다. 서버가 실행 중인지 확인하세요.")
+            time.sleep(1)
+    
+    ws = websocket.WebSocket()
+    # 웹소켓 연결 시도 (최대 3분)
+    max_attempts = int(180/5)  # 3분 (1초에 한 번씩 시도)
+    for attempt in range(max_attempts):
+        import time
+        try:
+            ws.connect(ws_url)
+            logger.info(f"웹소켓 연결 성공 (시도 {attempt+1})")
+            break
+        except Exception as e:
+            logger.warning(f"웹소켓 연결 실패 (시도 {attempt+1}/{max_attempts}): {e}")
+            if attempt == max_attempts - 1:
+                raise Exception("웹소켓 연결 시간 초과 (3분)")
+            time.sleep(5)
+    videos = get_videos(ws, prompt)
+    ws.close()
+
+    # 이미지가 없는 경우 처리
+    for node_id in videos:
+        if videos[node_id]:
+            return {"video": videos[node_id][0]}
+    
+    return {"error": "비디오를를 찾을 수 없습니다."}
+
+runpod.serverless.start({"handler": handler})
