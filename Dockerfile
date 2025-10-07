@@ -1,164 +1,87 @@
-# Build argument for base image selection
-ARG BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
+# Use the official RunPod PyTorch image with CUDA support
+FROM runpod/pytorch:2.2.0-py3.11-cuda12.1.1-devel-ubuntu22.04
 
-# Stage 1: Base image with common dependencies
-FROM ${BASE_IMAGE} AS base
+# Set working directory
+WORKDIR /app
 
-# Build arguments for this stage with sensible defaults for standalone builds
-ARG COMFYUI_VERSION=latest
-ARG CUDA_VERSION_FOR_COMFY
-ARG ENABLE_PYTORCH_UPGRADE=false
-ARG PYTORCH_INDEX_URL
-
-# Prevents prompts from packages asking for user input during installation
-ENV DEBIAN_FRONTEND=noninteractive
-# Prefer binary wheels over source distributions for faster pip installations
-ENV PIP_PREFER_BINARY=1
-# Ensures output from python is printed immediately to the terminal without buffering
-ENV PYTHONUNBUFFERED=1
-# Speed up some cmake builds
-ENV CMAKE_BUILD_PARALLEL_LEVEL=8
-
-# Install Python, git and other necessary tools
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
-    python3.12 \
-    python3.12-venv \
     git \
     wget \
-    libgl1 \
+    curl \
+    unzip \
+    ffmpeg \
+    libgl1-mesa-glx \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
-    libxrender1 \
-    ffmpeg \
-    && ln -sf /usr/bin/python3.12 /usr/bin/python \
-    && ln -sf /usr/bin/pip3 /usr/bin/pip
+    libxrender-dev \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
 
-# Clean up to reduce image size
-RUN apt-get autoremove -y && apt-get clean -y && rm -rf /var/lib/apt/lists/*
+# Install Python dependencies
+RUN pip install --no-cache-dir \
+    runpod \
+    requests \
+    pillow \
+    opencv-python \
+    numpy \
+    torch \
+    torchvision \
+    torchaudio \
+    transformers \
+    diffusers \
+    accelerate \
+    xformers \
+    safetensors
 
-# Install uv (latest) using official installer and create isolated venv
-RUN wget -qO- https://astral.sh/uv/install.sh | sh \
-    && ln -s /root/.local/bin/uv /usr/local/bin/uv \
-    && ln -s /root/.local/bin/uvx /usr/local/bin/uvx \
-    && uv venv /opt/venv
+# Clone ComfyUI
+RUN git clone https://github.com/comfyanonymous/ComfyUI.git /app/ComfyUI
 
-# Use the virtual environment for all subsequent commands
-ENV PATH="/opt/venv/bin:${PATH}"
+# Install ComfyUI dependencies
+RUN cd /app/ComfyUI && pip install -r requirements.txt
 
-# Install comfy-cli + dependencies needed by it to install ComfyUI
-RUN uv pip install comfy-cli pip setuptools wheel
+# Create model directories
+RUN mkdir -p /app/ComfyUI/models/diffusion_models \
+    /app/ComfyUI/models/vae \
+    /app/ComfyUI/models/text_encoders \
+    /app/ComfyUI/models/loras \
+    /app/ComfyUI/input \
+    /app/ComfyUI/output
 
-# Install ComfyUI
-RUN if [ -n "${CUDA_VERSION_FOR_COMFY}" ]; then \
-      /usr/bin/yes | comfy --workspace /comfyui install --version "${COMFYUI_VERSION}" --cuda-version "${CUDA_VERSION_FOR_COMFY}" --nvidia; \
-    else \
-      /usr/bin/yes | comfy --workspace /comfyui install --version "${COMFYUI_VERSION}" --nvidia; \
-    fi
+# Download WAN 2.2 models
+# Diffusion models
+RUN wget -O /app/ComfyUI/models/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors \
+    "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"
 
-# Upgrade PyTorch if needed (for newer CUDA versions)
-RUN if [ "$ENABLE_PYTORCH_UPGRADE" = "true" ]; then \
-      uv pip install --force-reinstall torch torchvision torchaudio --index-url ${PYTORCH_INDEX_URL}; \
-    fi
+RUN wget -O /app/ComfyUI/models/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors \
+    "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
 
-# Change working directory to ComfyUI
-WORKDIR /comfyui
+# VAE model
+RUN wget -O /app/ComfyUI/models/vae/wan_2.1_vae.safetensors \
+    "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors"
 
-# Support for the network volume
-ADD src/extra_model_paths.yaml ./
+# Text encoder
+RUN wget -O /app/ComfyUI/models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors \
+    "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
 
-# Go back to the root
-WORKDIR /
+# LoRA models
+RUN wget -O /app/ComfyUI/models/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors \
+    "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors"
 
-# Install Python runtime dependencies for the handler
-RUN uv pip install runpod requests websocket-client
+RUN wget -O /app/ComfyUI/models/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors \
+    "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"
 
-# Add application code and scripts
-ADD src/start.sh handler.py test_input.json ./
-RUN chmod +x /start.sh
+# Copy workflow and handler
+COPY wan2.2i2v.json /app/workflow.json
+COPY handler.py /app/handler.py
 
-# Add script to install custom nodes
-COPY scripts/comfy-node-install.sh /usr/local/bin/comfy-node-install
-RUN chmod +x /usr/local/bin/comfy-node-install
+# Set environment variables
+ENV PYTHONPATH="/app/ComfyUI:${PYTHONPATH}"
+ENV COMFYUI_PATH="/app/ComfyUI"
 
-# Prevent pip from asking for confirmation during uninstall steps in custom nodes
-ENV PIP_NO_INPUT=1
+# Expose port
+EXPOSE 8000
 
-# Copy helper script to switch Manager network mode at container start
-COPY scripts/comfy-manager-set-mode.sh /usr/local/bin/comfy-manager-set-mode
-RUN chmod +x /usr/local/bin/comfy-manager-set-mode
-
-# Install custom nodes required for Wani2.2 I2V workflow
-RUN if [ "$MODEL_TYPE" = "wani2v" ]; then \
-      cd /comfyui && \
-      # Install ComfyUI-VideoHelperSuite for video creation and saving \
-      comfy-node-install ComfyUI-VideoHelperSuite && \
-      # Install ComfyUI-WAN for WanImageToVideo node \
-      git clone https://github.com/comfyanonymous/ComfyUI-WAN.git custom_nodes/ComfyUI-WAN || true; \
-    fi
-
-# Set the default command to run when starting the container
-CMD ["/start.sh"]
-
-# Stage 2: Download models
-FROM base AS downloader
-
-ARG HUGGINGFACE_ACCESS_TOKEN
-# Set default model type if none is provided
-ARG MODEL_TYPE=wani2v
-
-# Change working directory to ComfyUI
-WORKDIR /comfyui
-
-# Create necessary directories upfront
-RUN mkdir -p models/checkpoints models/vae models/unet models/clip models/loras
-
-# Download checkpoints/vae/unet/clip models to include in image based on model type
-RUN if [ "$MODEL_TYPE" = "wani2v" ]; then \
-      # Create necessary directories for Wani2.2 models \
-      mkdir -p models/diffusion_models models/text_encoders && \
-      # Download Wani2.2 I2V diffusion models \
-      wget -q -O models/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors && \
-      wget -q -O models/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors && \
-      # Download VAE model \
-      wget -q -O models/vae/wan_2.1_vae.safetensors https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors && \
-      # Download text encoder \
-      wget -q -O models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors && \
-      # Download LoRA files \
-      wget -q -O models/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors && \
-      wget -q -O models/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors; \
-    fi
-
-RUN if [ "$MODEL_TYPE" = "sdxl" ]; then \
-      wget -q -O models/checkpoints/sd_xl_base_1.0.safetensors https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors && \
-      wget -q -O models/vae/sdxl_vae.safetensors https://huggingface.co/stabilityai/sdxl-vae/resolve/main/sdxl_vae.safetensors && \
-      wget -q -O models/vae/sdxl-vae-fp16-fix.safetensors https://huggingface.co/madebyollin/sdxl-vae-fp16-fix/resolve/main/sdxl_vae.safetensors; \
-    fi
-
-RUN if [ "$MODEL_TYPE" = "sd3" ]; then \
-      wget -q --header="Authorization: Bearer ${HUGGINGFACE_ACCESS_TOKEN}" -O models/checkpoints/sd3_medium_incl_clips_t5xxlfp8.safetensors https://huggingface.co/stabilityai/stable-diffusion-3-medium/resolve/main/sd3_medium_incl_clips_t5xxlfp8.safetensors; \
-    fi
-
-RUN if [ "$MODEL_TYPE" = "flux1-schnell" ]; then \
-      wget -q --header="Authorization: Bearer ${HUGGINGFACE_ACCESS_TOKEN}" -O models/unet/flux1-schnell.safetensors https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/flux1-schnell.safetensors && \
-      wget -q -O models/clip/clip_l.safetensors https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors && \
-      wget -q -O models/clip/t5xxl_fp8_e4m3fn.safetensors https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors && \
-      wget -q --header="Authorization: Bearer ${HUGGINGFACE_ACCESS_TOKEN}" -O models/vae/ae.safetensors https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/ae.safetensors; \
-    fi
-
-RUN if [ "$MODEL_TYPE" = "flux1-dev" ]; then \
-      wget -q --header="Authorization: Bearer ${HUGGINGFACE_ACCESS_TOKEN}" -O models/unet/flux1-dev.safetensors https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors && \
-      wget -q -O models/clip/clip_l.safetensors https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/clip_l.safetensors && \
-      wget -q -O models/clip/t5xxl_fp8_e4m3fn.safetensors https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors && \
-      wget -q --header="Authorization: Bearer ${HUGGINGFACE_ACCESS_TOKEN}" -O models/vae/ae.safetensors https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors; \
-    fi
-
-RUN if [ "$MODEL_TYPE" = "flux1-dev-fp8" ]; then \
-      wget -q -O models/checkpoints/flux1-dev-fp8.safetensors https://huggingface.co/Comfy-Org/flux1-dev/resolve/main/flux1-dev-fp8.safetensors; \
-    fi
-
-# Stage 3: Final image
-FROM base AS final
-
-# Copy models from stage 2 to the final image
-COPY --from=downloader /comfyui/models /comfyui/models
+# Start the handler
+CMD ["python", "-u", "handler.py"]
