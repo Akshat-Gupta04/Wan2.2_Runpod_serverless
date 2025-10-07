@@ -8,42 +8,33 @@ import uuid
 import logging
 import urllib.request
 import urllib.parse
-import binascii # Base64 에러 처리를 위해 import
-# 로깅 설정
+import binascii
+import time
+
+# Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
 server_address = os.getenv('SERVER_ADDRESS', '127.0.0.1')
 client_id = str(uuid.uuid4())
+
 def save_data_if_base64(data_input, temp_dir, output_filename):
     """
-    입력 데이터가 Base64 문자열인지 확인하고, 맞다면 파일로 저장 후 경로를 반환합니다.
-    만약 일반 경로 문자열이라면 그대로 반환합니다.
+    Check if input data is Base64 string and save as file, otherwise return as path.
     """
-    # 입력값이 문자열이 아니면 그대로 반환
     if not isinstance(data_input, str):
         return data_input
 
     try:
-        # Base64 문자열은 디코딩을 시도하면 성공합니다.
         decoded_data = base64.b64decode(data_input)
-        
-        # 디렉토리가 존재하지 않으면 생성
         os.makedirs(temp_dir, exist_ok=True)
-        
-        # 디코딩에 성공하면, 임시 파일로 저장합니다.
         file_path = os.path.abspath(os.path.join(temp_dir, output_filename))
-        with open(file_path, 'wb') as f: # 바이너리 쓰기 모드('wb')로 저장
+        with open(file_path, 'wb') as f:
             f.write(decoded_data)
-        
-        # 저장된 파일의 경로를 반환합니다.
-        print(f"✅ Base64 입력을 '{file_path}' 파일로 저장했습니다.")
+        logger.info(f"✅ Base64 input saved to '{file_path}'")
         return file_path
-
     except (binascii.Error, ValueError):
-        # 디코딩에 실패하면, 일반 경로로 간주하고 원래 값을 그대로 반환합니다.
-        print(f"➡️ '{data_input}'은(는) 파일 경로로 처리합니다.")
+        logger.info(f"➡️ '{data_input}' treated as file path")
         return data_input
     
 def queue_prompt(prompt):
@@ -102,163 +93,133 @@ def load_workflow(workflow_path):
 
 def handler(job):
     job_input = job.get("input", {})
-
     logger.info(f"Received job input: {job_input}")
     task_id = f"task_{uuid.uuid4()}"
 
-    # image_input = job_input["image_path"]
-    
+    # Handle image input (Base64 or path)
     image_path_input = job_input.get("image_path")
     image_base64_input = job_input.get("image_base64")
-    # 헬퍼 함수를 사용해 이미지 파일 경로 확보 (Base64 또는 Path)
-    # 이미지 확장자를 알 수 없으므로 .jpg로 가정하거나, 입력에서 받아야 합니다.
+
     if image_path_input:
-        if image_path_input == "/example_image.png":
-            image_path = "/example_image.png"
-        else:
-            image_path = image_path_input
-    else:
-        # Base64인 경우 디코딩하여 저장
+        image_path = image_path_input
+    elif image_base64_input:
         try:
             os.makedirs(task_id, exist_ok=True)
             image_path = os.path.join(task_id, "input_image.jpg")
             decoded_data = base64.b64decode(image_base64_input)
             with open(image_path, 'wb') as f:
                 f.write(decoded_data)
-            logger.info(f"Base64 비디오를 '{image_path}' 파일로 저장했습니다.")
+            logger.info(f"Base64 image saved to '{image_path}'")
         except Exception as e:
-            return {"error": f"Base64 이미지 디코딩 실패: {e}"}
-    
-    # LoRA 설정 확인 - 배열로 받아서 처리
-    lora_pairs = job_input.get("lora_pairs", [])
-    
-    # LoRA 개수에 따라 적절한 워크플로우 파일 선택
-    lora_count = len(lora_pairs)
-    if lora_count == 0:
-        workflow_file = "/wan22_nolora.json"
-        logger.info("Using no LoRA workflow")
-    elif lora_count == 1:
-        workflow_file = "/wan22_1lora.json"
-        logger.info("Using 1 LoRA pair workflow")
-    elif lora_count == 2:
-        workflow_file = "/wan22_2lora.json"
-        logger.info("Using 2 LoRA pairs workflow")
-    elif lora_count == 3:
-        workflow_file = "/wan22_3lora.json"
-        logger.info("Using 3 LoRA pairs workflow")
+            return {"error": f"Base64 image decoding failed: {e}"}
     else:
-        logger.warning(f"LoRA 개수가 {lora_count}개입니다. 최대 3개까지만 지원됩니다. 3개로 제한합니다.")
-        lora_count = 3
-        workflow_file = "/wan22_3lora.json"
-        lora_pairs = lora_pairs[:3]  # 처음 3개만 사용
-    
-    prompt = load_workflow(workflow_file)
-    
+        return {"error": "Either image_path or image_base64 must be provided"}
+
+    # Load the specific Wan2.2 I2V workflow
+    workflow_file = "/video_wan2_2_14B_i2v.json"
+    logger.info("Using video_wan2_2_14B_i2v.json workflow")
+
+    try:
+        prompt = load_workflow(workflow_file)
+    except Exception as e:
+        return {"error": f"Failed to load workflow: {e}"}
+
+    # Get parameters from input
+    positive_prompt = job_input.get("prompt", "A beautiful scene with natural motion")
+    negative_prompt = job_input.get("negative_prompt", "bad quality, static, blurry")
+    seed = job_input.get("seed", 42)
+    cfg = job_input.get("cfg", 7.5)
+    width = job_input.get("width", 640)
+    height = job_input.get("height", 640)
     length = job_input.get("length", 81)
-    steps = job_input.get("steps", 10)
+    steps = job_input.get("steps", 20)
 
-    prompt["260"]["inputs"]["image"] = image_path
-    prompt["846"]["inputs"]["value"] = length
-    prompt["246"]["inputs"]["value"] = job_input["prompt"]
-    prompt["835"]["inputs"]["noise_seed"] = job_input["seed"]
-    prompt["830"]["inputs"]["cfg"] = job_input["cfg"]
-    prompt["849"]["inputs"]["value"] = job_input["width"]
-    prompt["848"]["inputs"]["value"] = job_input["height"]
-    
-    # step 설정 적용
-    if "834" in prompt:
-        prompt["834"]["inputs"]["steps"] = steps
-        logger.info(f"Steps set to: {steps}")
-        lowsteps = int(steps*0.6)
-        prompt["829"]["inputs"]["step"] = lowsteps
-        logger.info(f"LowSteps set to: {lowsteps}")
-    
-    # LoRA 설정 적용
-    if lora_count > 0:
-        # LoRA 노드 ID 매핑 (각 워크플로우에서 LoRA 노드 ID가 다름)
-        lora_node_mapping = {
-            1: {
-                "high": ["282"],
-                "low": ["286"]
-            },
-            2: {
-                "high": ["282", "339"],
-                "low": ["286", "337"]
-            },
-            3: {
-                "high": ["282", "339", "340"],
-                "low": ["286", "337", "338"]
-            }
-        }
-        
-        current_mapping = lora_node_mapping[lora_count]
-        
-        for i, lora_pair in enumerate(lora_pairs):
-            if i < lora_count:
-                lora_high = lora_pair.get("high")
-                lora_low = lora_pair.get("low")
-                lora_high_weight = lora_pair.get("high_weight", 1.0)
-                lora_low_weight = lora_pair.get("low_weight", 1.0)
-                
-                # HIGH LoRA 설정
-                if i < len(current_mapping["high"]):
-                    high_node_id = current_mapping["high"][i]
-                    if high_node_id in prompt and lora_high:
-                        prompt[high_node_id]["inputs"]["lora_name"] = lora_high
-                        prompt[high_node_id]["inputs"]["strength_model"] = lora_high_weight
-                        logger.info(f"LoRA {i+1} HIGH applied: {lora_high} with weight {lora_high_weight}")
-                
-                # LOW LoRA 설정
-                if i < len(current_mapping["low"]):
-                    low_node_id = current_mapping["low"][i]
-                    if low_node_id in prompt and lora_low:
-                        prompt[low_node_id]["inputs"]["lora_name"] = lora_low
-                        prompt[low_node_id]["inputs"]["strength_model"] = lora_low_weight
-                        logger.info(f"LoRA {i+1} LOW applied: {lora_low} with weight {lora_low_weight}")
+    # Configure workflow parameters based on video_wan2_2_14B_i2v.json structure
+    # Image input nodes (LoadImage nodes: 62 and 97)
+    if "62" in prompt:
+        prompt["62"]["inputs"]["image"] = os.path.basename(image_path)
+    if "97" in prompt:
+        prompt["97"]["inputs"]["image"] = os.path.basename(image_path)
 
+    # Text encoding nodes (CLIPTextEncode nodes: 6, 7, 93, 89)
+    if "6" in prompt:  # Positive prompt for fp8_scaled workflow
+        prompt["6"]["widgets_values"][0] = positive_prompt
+    if "7" in prompt:  # Negative prompt for fp8_scaled workflow
+        prompt["7"]["widgets_values"][0] = negative_prompt
+    if "93" in prompt:  # Positive prompt for 4steps LoRA workflow
+        prompt["93"]["widgets_values"][0] = positive_prompt
+    if "89" in prompt:  # Negative prompt for 4steps LoRA workflow
+        prompt["89"]["widgets_values"][0] = negative_prompt
+
+    # WanImageToVideo nodes (63 and 98) - video parameters
+    if "63" in prompt:  # fp8_scaled workflow
+        prompt["63"]["widgets_values"] = [width, height, length, 1]  # [width, height, length, batch_size]
+    if "98" in prompt:  # 4steps LoRA workflow
+        prompt["98"]["widgets_values"] = [width, height, length, 1]
+
+    # KSamplerAdvanced nodes for sampling parameters
+    sampler_nodes = ["57", "58", "85", "86"]  # KSamplerAdvanced node IDs
+    for node_id in sampler_nodes:
+        if node_id in prompt:
+            # Update seed and steps
+            if "noise_seed" in prompt[node_id]["widgets_values"]:
+                seed_index = 1  # Usually index 1 for noise_seed
+                if len(prompt[node_id]["widgets_values"]) > seed_index:
+                    prompt[node_id]["widgets_values"][seed_index] = seed
+            if "steps" in prompt[node_id]["widgets_values"]:
+                steps_index = 3  # Usually index 3 for steps
+                if len(prompt[node_id]["widgets_values"]) > steps_index:
+                    prompt[node_id]["widgets_values"][steps_index] = steps
+            if "cfg" in prompt[node_id]["widgets_values"]:
+                cfg_index = 4  # Usually index 4 for cfg
+                if len(prompt[node_id]["widgets_values"]) > cfg_index:
+                    prompt[node_id]["widgets_values"][cfg_index] = cfg
+
+    logger.info(f"Configured workflow with: prompt='{positive_prompt[:50]}...', seed={seed}, cfg={cfg}, size={width}x{height}, length={length}, steps={steps}")
+
+    # Connect to ComfyUI WebSocket
     ws_url = f"ws://{server_address}:8188/ws?clientId={client_id}"
     logger.info(f"Connecting to WebSocket: {ws_url}")
-    
-    # 먼저 HTTP 연결이 가능한지 확인
+
+    # Check HTTP connection first
     http_url = f"http://{server_address}:8188/"
     logger.info(f"Checking HTTP connection to: {http_url}")
-    
-    # HTTP 연결 확인 (최대 1분)
+
     max_http_attempts = 180
     for http_attempt in range(max_http_attempts):
         try:
-            import urllib.request
             response = urllib.request.urlopen(http_url, timeout=5)
-            logger.info(f"HTTP 연결 성공 (시도 {http_attempt+1})")
+            logger.info(f"HTTP connection successful (attempt {http_attempt+1})")
             break
         except Exception as e:
-            logger.warning(f"HTTP 연결 실패 (시도 {http_attempt+1}/{max_http_attempts}): {e}")
+            logger.warning(f"HTTP connection failed (attempt {http_attempt+1}/{max_http_attempts}): {e}")
             if http_attempt == max_http_attempts - 1:
-                raise Exception("ComfyUI 서버에 연결할 수 없습니다. 서버가 실행 중인지 확인하세요.")
+                raise Exception("Cannot connect to ComfyUI server. Please check if server is running.")
             time.sleep(1)
-    
+
+    # Connect to WebSocket
     ws = websocket.WebSocket()
-    # 웹소켓 연결 시도 (최대 3분)
-    max_attempts = int(180/5)  # 3분 (1초에 한 번씩 시도)
+    max_attempts = int(180/5)  # 3 minutes
     for attempt in range(max_attempts):
-        import time
         try:
             ws.connect(ws_url)
-            logger.info(f"웹소켓 연결 성공 (시도 {attempt+1})")
+            logger.info(f"WebSocket connection successful (attempt {attempt+1})")
             break
         except Exception as e:
-            logger.warning(f"웹소켓 연결 실패 (시도 {attempt+1}/{max_attempts}): {e}")
+            logger.warning(f"WebSocket connection failed (attempt {attempt+1}/{max_attempts}): {e}")
             if attempt == max_attempts - 1:
-                raise Exception("웹소켓 연결 시간 초과 (3분)")
+                raise Exception("WebSocket connection timeout (3 minutes)")
             time.sleep(5)
+
+    # Generate video
     videos = get_videos(ws, prompt)
     ws.close()
 
-    # 이미지가 없는 경우 처리
+    # Return first video found
     for node_id in videos:
         if videos[node_id]:
             return {"video": videos[node_id][0]}
-    
-    return {"error": "비디오를를 찾을 수 없습니다."}
+
+    return {"error": "No video output found"}
 
 runpod.serverless.start({"handler": handler})

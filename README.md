@@ -1,27 +1,29 @@
-# RunPod Image 2 Video using RunPod Serverless
+# RunPod Wan2.2 I2V Serverless with Network Volume
 
-> **Empowering high-quality video generation through cutting-edge AI and serverless deployment**
+> **High-quality video generation using Wan2.2 14B model with RunPod Network Volume integration**
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.8+-green.svg)](https://python.org)
 [![RunPod](https://img.shields.io/badge/Platform-RunPod-purple.svg)](https://runpod.io)
 
-[한국어 README 보기](README_kr.md)
-
 ## About the Project
 
-**RunPod Image 2 Video** is a comprehensive serverless solution that transforms static images into dynamic, high-quality videos using advanced AI technology. Built specifically for the RunPod Serverless environment, this project leverages the power of [Wan2.2](https://github.com/Comfy-Org/Wan_2.2_ComfyUI_Repackaged) to generate videos with natural motion and realistic animations.
+**RunPod Wan2.2 I2V Serverless** is a streamlined serverless solution that transforms static images into dynamic, high-quality videos using the Wan2.2 14B model. This setup is specifically configured to work with RunPod Network Volumes, providing efficient model storage and access.
 
-This template provides a complete, production-ready deployment solution that handles everything from image processing to video generation, all while maintaining optimal performance in a serverless architecture.
+**Key Configuration:**
+- **Network Volume ID**: `q596vcx1ln`
+- **Endpoint URL**: `https://s3api-eu-ro-1.runpod.io`
+- **Workflow**: `video_wan2_2_14B_i2v.json` (14B parameter model)
+- **Model Storage**: All models accessed from network volume
 
 ## ✨ Key Features
 
-- **🎬 Image-to-Video Generation**: Transform static images into dynamic videos with natural motion and realistic animations
-- **🎯 High-Quality Output**: Generate high-resolution videos with professional-grade visual quality
-- **⚙️ Customizable Parameters**: Fine-tune video generation with comprehensive control over seed, dimensions, prompts, and more
-- **🔧 ComfyUI Integration**: Built on ComfyUI's robust workflow management system for maximum flexibility
+- **🎬 Wan2.2 14B I2V**: Uses the powerful 14B parameter Wan2.2 model for high-quality image-to-video generation
+- **💾 Network Volume Integration**: Efficient model storage and access via RunPod Network Volumes
+- **⚡ Optimized Workflow**: Single, streamlined workflow (`video_wan2_2_14B_i2v.json`) for consistent results
+- **🔧 ComfyUI Backend**: Built on ComfyUI's robust workflow management system
 - **☁️ Serverless Architecture**: Optimized for RunPod's serverless environment with automatic scaling
-- **🎨 LoRA Support**: Advanced LoRA model integration for enhanced customization capabilities
+- **📦 Pre-configured Setup**: Ready-to-use with your existing network volume containing all required models
 
 ## 🚀 Template Components
 
@@ -44,102 +46,62 @@ The API accepts a comprehensive set of parameters for fine-tuned video generatio
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `image_path` | `string` | No | `/example_image.png` | Local path to the input image file |
+| `image_path` | `string` | No | - | Path to the input image file (from network volume or local) |
 | `image_base64` | `string` | No | - | Base64 encoded image string |
 
-#### 🎨 LoRA Configuration
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `lora_pairs` | `array` | No | `[]` | Array of LoRA model pairs for enhanced customization |
-
-> **📝 Note**: LoRA models must be uploaded to the `/loras/` directory in your RunPod Network Volume. Model names in `lora_pairs` should match the filenames exactly.
-
-#### LoRA Pair Structure
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `high` | `string` | Yes | - | High-quality LoRA model filename |
-| `low` | `string` | Yes | - | Low-quality LoRA model filename |
-| `high_weight` | `float` | No | `1.0` | Weight for high-quality LoRA |
-| `low_weight` | `float` | No | `1.0` | Weight for low-quality LoRA |
+> **📝 Note**: Either `image_path` or `image_base64` must be provided. Images from network volume should use full paths.
 
 #### 🎬 Video Generation Parameters
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `prompt` | `string` | Yes | - | Descriptive text for video generation |
-| `seed` | `integer` | Yes | - | Random seed for reproducible results |
-| `cfg` | `float` | Yes | - | CFG scale for generation control |
-| `width` | `integer` | Yes | - | Output video width (pixels) |
-| `height` | `integer` | Yes | - | Output video height (pixels) |
+| `prompt` | `string` | No | `"A beautiful scene with natural motion"` | Descriptive text for video generation |
+| `negative_prompt` | `string` | No | `"bad quality, static, blurry"` | Negative prompt to avoid unwanted elements |
+| `seed` | `integer` | No | `42` | Random seed for reproducible results |
+| `cfg` | `float` | No | `7.5` | CFG scale for generation control |
+| `width` | `integer` | No | `640` | Output video width (pixels) |
+| `height` | `integer` | No | `640` | Output video height (pixels) |
 | `length` | `integer` | No | `81` | Video length in frames |
-| `steps` | `integer` | No | `10` | Number of denoising steps |
+| `steps` | `integer` | No | `20` | Number of denoising steps |
 
 ### 💡 Usage Examples
 
-#### Basic Video Generation
+#### Basic Video Generation with Image Path
 ```json
 {
   "input": {
+    "image_path": "/runpod-volume/images/portrait.jpg",
     "prompt": "A person walking naturally through a peaceful garden",
-    "image_path": "/my_volume/portrait.jpg",
+    "negative_prompt": "static, blurry, low quality",
     "seed": 12345,
     "cfg": 7.5,
-    "width": 512,
-    "height": 512,
+    "width": 640,
+    "height": 640,
     "length": 81,
-    "steps": 10
+    "steps": 20
   }
 }
 ```
 
-#### Enhanced Generation with LoRA
+#### Video Generation with Base64 Image
 ```json
 {
   "input": {
-    "prompt": "A person walking naturally through a peaceful garden",
-    "image_base64": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD...",
-    "seed": 12345,
-    "cfg": 7.5,
+    "image_base64": "/9j/4AAQSkZJRgABAQAAAQABAAD...",
+    "prompt": "A beautiful landscape with gentle motion",
+    "seed": 42,
+    "cfg": 8.0,
     "width": 512,
-    "height": 512,
-    "lora_pairs": [
-      {
-        "high": "style_enhancement_high.safetensors",
-        "low": "style_enhancement_low.safetensors",
-        "high_weight": 1.0,
-        "low_weight": 0.8
-      }
-    ]
+    "height": 512
   }
 }
 ```
 
-#### Advanced Multi-LoRA Configuration
+#### Minimal Request (using defaults)
 ```json
 {
   "input": {
-    "prompt": "A person walking naturally through a peaceful garden",
-    "image_path": "/my_volume/portrait.jpg",
-    "seed": 12345,
-    "cfg": 7.5,
-    "width": 512,
-    "height": 512,
-    "lora_pairs": [
-      {
-        "high": "motion_style_high.safetensors",
-        "low": "motion_style_low.safetensors",
-        "high_weight": 1.0,
-        "low_weight": 0.8
-      },
-      {
-        "high": "lighting_enhance_high.safetensors",
-        "low": "lighting_enhance_low.safetensors",
-        "high_weight": 0.9,
-        "low_weight": 0.7
-      }
-    ]
+    "image_path": "/runpod-volume/images/test.jpg"
   }
 }
 ```
@@ -210,31 +172,31 @@ Optimize performance and handle large files efficiently using RunPod's Network V
 
 ## 🔧 Workflow Architecture
 
-### Intelligent Workflow Selection
+### Single Workflow Design
 
-The template features **dynamic workflow selection** that automatically chooses the optimal configuration based on your LoRA requirements:
+This setup uses a single, optimized workflow: **`video_wan2_2_14B_i2v.json`**
 
-| LoRA Pairs | Workflow File | Description |
-|------------|---------------|-------------|
-| **0** | `wan22_nolora.json` | Standard image-to-video generation |
-| **1** | `wan22_1lora.json` | Single LoRA pair enhancement |
-| **2** | `wan22_2lora.json` | Dual LoRA pair processing |
-| **3** | `wan22_3lora.json` | Triple LoRA pair optimization |
+**Key Features:**
+- **Wan2.2 14B Model**: Uses both high-noise and low-noise 14B parameter models
+- **Dual Processing Path**: Includes both standard and 4-step LoRA processing paths
+- **Automatic Model Loading**: All models loaded from network volume automatically
+- **Optimized Performance**: Streamlined for consistent, high-quality results
 
 ### Workflow Components
 
-Each workflow is built on **ComfyUI's robust architecture** and includes:
+The workflow includes these essential processing nodes:
 
 #### Core Processing Nodes
-- **CLIP Text Encoding**: Advanced prompt processing and understanding
-- **VAE Processing**: High-quality image encoding and decoding
-- **WanImageToVideo**: Primary video generation engine
-- **Image Processing**: Concatenation and transformation utilities
+- **CLIP Text Encoding**: Advanced prompt processing with UMT5 XXL model
+- **VAE Processing**: High-quality image encoding/decoding with Wan 2.1 VAE
+- **WanImageToVideo**: Primary video generation engine with 14B parameters
+- **Model Sampling**: SD3 sampling for optimal quality
+- **Video Output**: Direct MP4 video generation
 
-#### LoRA Integration (When Applicable)
-- **Dynamic LoRA Loading**: Automatic model loading based on configuration
-- **Weight Application**: Precise control over LoRA influence
-- **Multi-LoRA Blending**: Seamless integration of multiple enhancement models
+#### Model Integration
+- **Diffusion Models**: High/low noise 14B models for different processing stages
+- **LoRA Support**: Built-in 4-step lightning LoRA for faster generation
+- **Network Volume Access**: All models accessed directly from your network volume
 
 ## 🤝 Contributing
 
